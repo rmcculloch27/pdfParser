@@ -1,0 +1,8 @@
+*.pyc
+__pycache__/
+*.egg-info/
+.DS_Store
+gInvoiceParser_debug.log
+demo/
+.env/
+venv/
