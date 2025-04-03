@@ -1,0 +1,2 @@
+[console_scripts]
+gInvoiceParser = gInvoiceParser.gui:main
