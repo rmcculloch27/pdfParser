@@ -1,84 +1,105 @@
+# import re
+# import pandas as pd
+# from datetime import datetime
+
+# def extract_google_workspace(summary_text, tables, detail_text, filename):
+#     # Extract month range directly from summary_text
+#     month_match = re.search(r"Summary for (.+?\d{4})", summary_text)
+#     month_range = month_match.group(1) if month_match else "N/A"
+
+#     # Extract invoice number and subtotal amount
+#     invoice_match = re.search(r"Invoice number: (\d+)", summary_text)
+#     subtotal_match = re.search(r"Subtotal in USD \$([\d,.]+)", summary_text)
+
+#     invoice_number = invoice_match.group(1) if invoice_match else "N/A"
+#     subtotal = subtotal_match.group(1) if subtotal_match else "N/A"
+
+#     summary_df = pd.DataFrame([{
+#         "InvoiceType": "Google Workspace",
+#         "Invoice#": invoice_number,
+#         "Month": month_range,
+#         "Amount($)": subtotal,
+#         "filename": filename,
+#         "RowType": "summary"
+#     }])
+
+#     # Parse detail rows
+#     detail_lines = detail_text.splitlines()
+#     detail_rows = []
+#     for line in detail_lines:
+#         match = re.match(
+#             r"(Google Workspace Enterprise Standard Usage .+?)\s+(\d+)\s+([\d,]+\.\d{2})$", line)
+#         if match:
+#             description = match.group(1)
+#             quantity = match.group(2)
+#             amount = match.group(3)
+#             detail_rows.append({
+#                 "InvoiceType": "Google Workspace",
+#                 "Invoice#": invoice_number,
+#                 "Month": month_range,
+#                 "Description": description,
+#                 "Quantity": quantity,
+#                 "UOM": "users",
+#                 "Amount($)": amount,
+#                 "filename": filename,
+#                 "RowType": "detail"
+#             })
+
+#     detail_df = pd.DataFrame(detail_rows)
+
+#     return summary_df, detail_df
+from pathlib import Path
 import re
 import pandas as pd
 
-def extract_google_workspace(summary_text: str, tables: list, detail_text: str, filename: str):
-    # --- Clean and normalize the summary text ---
-    cleaned_summary = re.sub(r"[^\x20-\x7E]+", " ", summary_text)
+def extract_google_workspace(text_dict, invoice_num, filename, invoice_month):
+    rows = []
 
-    # --- Extract summary metadata ---
-    invoice_number_match = re.search(r"Invoice number[:\s]*([0-9]+)", cleaned_summary, re.IGNORECASE)
-    month_match = re.search(
-        r"Period[:\s]*([A-Za-z]+\s+\d{1,2},\s+\d{4})\s*-\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})",
-        cleaned_summary,
-        re.IGNORECASE
-    )
+    # Reconstruct full text from text_dict
+    full_text = "\n".join(p.get("text", "") for p in text_dict.values())
 
-    invoice_number = invoice_number_match.group(1) if invoice_number_match else "N/A"
-    if month_match:
-        month = f"{month_match.group(1)} - {month_match.group(2)}"
-    else:
-        month = "N/A"
+    # Define summary_text and detail_text
+    summary_text = text_dict.get("page_1", {}).get("text", "")
+    detail_text = "\n".join([v.get("text", "") for k, v in text_dict.items() if k != "page_1"])
 
-    detail_rows = []
+    # Extract month range from summary_text
+    month_match = re.search(r"Summary for (.+?\d{4})", summary_text)
+    month_range = month_match.group(1) if month_match else invoice_month or "N/A"
 
-    # --- Attempt structured table parsing ---
-    if tables:
-        print(f"[DEBUG] Google Workspace: Found {len(tables)} tables in {filename}")
-        for table in tables:
-            if not table or len(table) < 2:
-                continue
-            for row in table[1:]:
-                if not row or len(row) < 4:
-                    continue
-                try:
-                    detail_rows.append({
-                        "InvoiceType": "Google Workspace",
-                        "Invoice#": invoice_number,
-                        "Month": month,
-                        "Description": row[0],
-                        "Quantity": row[1],
-                        "UOM": row[2],
-                        "Amount($)": float(row[-1].replace(",", ""))
-                    })
-                except Exception:
-                    continue
+    # Extract invoice number and subtotal
+    invoice_match = re.search(r"Invoice number: (\d+)", summary_text)
+    subtotal_match = re.search(r"Subtotal in USD \$([\d,.]+)", summary_text)
 
-    # --- Fallback to raw text parsing if no valid tables ---
-    if not detail_rows:
-        print(f"[DEBUG] No valid tables for {filename}. Using fallback text parsing.")
-        print(f"[DEBUG] Detail text snippet:\n{detail_text[:500]}")
+    invoice_number = invoice_match.group(1) if invoice_match else invoice_num or "N/A"
+    subtotal = subtotal_match.group(1) if subtotal_match else "N/A"
 
-        fallback_pattern = re.compile(
-            r"(?P<desc>.+?)\s+(?P<qty>\d{1,5})\s+\$?(?P<amount>[\d,]+\.\d{2})"
-        )
-
-        for line in detail_text.splitlines():
-            match = fallback_pattern.match(line.strip())
-            if match:
-                try:
-                    detail_rows.append({
-                        "InvoiceType": "Google Workspace",
-                        "Invoice#": invoice_number,
-                        "Month": month,
-                        "Description": match.group("desc").strip(),
-                        "Quantity": int(match.group("qty").replace(",", "")),
-                        "UOM": "users",  # assumed default UOM
-                        "Amount($)": float(match.group("amount").replace(",", ""))
-                    })
-                except Exception:
-                    continue
-
-    # --- Summary total from detail (or 0.0 if none) ---
-    total_amount = sum(float(row["Amount($)"]) for row in detail_rows if row.get("Amount($)"))
-
-    summary_df = pd.DataFrame([{
+    # Summary row
+    rows.append({
         "InvoiceType": "Google Workspace",
         "Invoice#": invoice_number,
-        "Month": month,
-        "Amount($)": round(total_amount, 2)
-    }])
+        "Month": month_range,
+        "Amount($)": subtotal,
+        "filename": Path(filename).name,
+        "RowType": "summary"
+    })
 
-    detail_df = pd.DataFrame(detail_rows)
-    print(f"[DEBUG] Parsed {len(detail_df)} Workspace detail rows for {filename}")
-    print(f"[DEBUG] Detail text preview for {filename}:\n{detail_text[:1000]}")
-    return summary_df, detail_df
+    # Parse detail lines
+    for line in detail_text.splitlines():
+        match = re.match(r"(Google Workspace Enterprise Standard Usage .+?)\s+(\d+)\s+([\d,]+\.\d{2})$", line)
+        if match:
+            description = match.group(1)
+            quantity = match.group(2)
+            amount = match.group(3)
+            rows.append({
+                "InvoiceType": "Google Workspace",
+                "Invoice#": invoice_number,
+                "Month": month_range,
+                "Description": description,
+                "Quantity": quantity,
+                "UOM": "users",
+                "Amount($)": amount,
+                "filename": Path(filename).name,
+                "RowType": "detail"
+            })
+
+    return pd.DataFrame(rows) if rows else None

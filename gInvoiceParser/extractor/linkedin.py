@@ -1,44 +1,85 @@
 import re
 import pandas as pd
 
-def extract_linkedin(summary_text: str, tables: list, detail_text: str, filename: str):
-    # Summary Metadata
-    invoice_number = re.search(r"Invoice Number\s*[:]*\s*(\d+)", summary_text)
-    invoice_num = invoice_number.group(1) if invoice_number else "N/A"
-
-    # Extract month from billing period
-    month_match = re.search(r"Billing Period From\s+(\d{2}-[A-Z]{3}-\d{4})", summary_text)
-    month = "Dec 2024" if month_match else "N/A"  # Fallback to Dec 2024 if not found
-
-    # Total from 'Balance Due'
-    amount_match = re.search(r"Balance Due\s*[:]*\s*USD\s*([\d,]+\.\d{2})", summary_text)
-    total_amount = float(amount_match.group(1).replace(",", "")) if amount_match else 0.0
-
-    # Summary Row
-    summary_df = pd.DataFrame([{
-        "InvoiceType": "LinkedIn",
-        "Invoice#": invoice_num,
-        "Month": month,
-        "Amount($)": total_amount
-    }])
-
-    # --- Updated Detail Fallback ---
+def extract_linkedin(text_dict, invoice_num, filename, invoice_month):
     detail_rows = []
-    detail_pattern = re.compile(
-        r"Campaign:\s+(.*?)\s+(\d+(?:\.\d{2})?)\s+\d+\s+(\d+(?:\.\d{2})?)"
-    )
+    summary_row = {}
+    campaign_block = []
 
-    for match in detail_pattern.finditer(detail_text):
-        detail_rows.append({
+    def flush_block(block):
+        joined = " ".join(block)
+        if "Campaign:" in joined:
+            row = parse_campaign_block(joined)
+            if row:
+                detail_rows.append(row)
+        block.clear()
+
+    def parse_campaign_block(joined):
+        campaign_match = re.search(r"Campaign:\s*(.+?)\s+(\d{1,3}(?:,\d{3})*|\d+)\.\d{2}", joined)
+        if not campaign_match:
+            return None
+
+        campaign = campaign_match.group(1).strip()
+        # Extract amount ($) after quantity (1)
+        billed_match = re.search(r'\b1\s+([\d,]+\.\d{2})\s+0\.00', joined)
+        billed_amount = billed_match.group(1).replace(',', '') if billed_match else None
+
+        # Fallback: try to find amount based on other float patterns after "Qty" field
+        if not billed_amount:
+            alt_match = re.search(r'Qty\s+1\s+([\d,]+\.\d{2})', joined)
+            if alt_match:
+                billed_amount = alt_match.group(1).replace(',', '')
+
+        return {
             "InvoiceType": "LinkedIn",
             "Invoice#": invoice_num,
-            "Month": month,
-            "Campaign": match.group(1).strip(),
-            "Quantity": float(match.group(2)),
-            "Amount($)": float(match.group(3)),
-            "RowType": "detail"
-        })
+            "Month": invoice_month,
+            "Amount($)": billed_amount,
+            "filename": filename,
+            "RowType": "detail",
+            "Quantity": 1,
+            "UOM": "CPM",
+            "FeeType": "",
+            "Partner": "",
+            "PartnerID": "",
+            "AdvertiserName": "",
+            "AdvertiserID": "",
+            "Campaign": campaign
+        }
 
-    print(f"[DEBUG] Parsed {len(detail_rows)} LinkedIn detail rows for {filename}")
-    return summary_df, pd.DataFrame(detail_rows)
+    for page_num, page in text_dict.items():
+        if "Special Instructions" in page.get("text", ""):
+            summary_match = re.search(r'Total\s+([\d,]+\.\d{2})', page.get("text", ""))
+            if summary_match:
+                amount = summary_match.group(1).replace(",", "")
+                summary_row = {
+                    "InvoiceType": "LinkedIn",
+                    "Invoice#": invoice_num,
+                    "Month": invoice_month,
+                    "Amount($)": amount,
+                    "filename": filename,
+                    "RowType": "summary",
+                    "Description": "Total",
+                    "Quantity": "",
+                    "UOM": "",
+                    "FeeType": "SUMMARY",
+                    "Partner": "SUMMARY",
+                    "PartnerID": "SUMMARY",
+                    "AdvertiserName": "SUMMARY",
+                    "AdvertiserID": "SUMMARY",
+                    "Campaign": "TOTAL"
+                }
+        lines = page.get("text", "").splitlines()
+        for line in lines:
+            if re.match(r"^\d+\s+Campaign:", line) or line.strip().startswith("Campaign:"):
+                flush_block(campaign_block)
+                campaign_block.append(line)
+            elif line.strip() == "":
+                flush_block(campaign_block)
+            else:
+                campaign_block.append(line)
+        flush_block(campaign_block)
 
+    all_rows = [summary_row] if summary_row else []
+    all_rows.extend(detail_rows)
+    return pd.DataFrame(all_rows)
