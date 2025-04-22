@@ -1,130 +1,150 @@
-import pdfplumber
-import os
-import pandas as pd
 from pathlib import Path
-from .extractor.dv360 import extract_dv360
-from .extractor.cm360 import extract_cm360
-from .extractor.google_ads import extract_google_ads
-from .extractor.linkedin import extract_linkedin
-from .extractor.google_workspace import extract_google_workspace
-from collections.abc import Iterable
+import re
+import pdfplumber
+import pandas as pd
+from gInvoiceParser.extractor.dv360 import extract_dv360
+from gInvoiceParser.extractor.cm360 import extract_cm360
+from gInvoiceParser.extractor.google_ads import extract_google_ads
+from gInvoiceParser.extractor.linkedin import extract_linkedin
+from gInvoiceParser.extractor.google_workspace import extract_google_workspace
+from gInvoiceParser.extractor.sa360 import extract_sa360
+# Constants
+DEBUG_MODE = False
 
+# Extractor mapping
+extractor_map = {
+    "CM360": extract_cm360,
+    "DV360": extract_dv360,
+    "GOOGLE_ADS": extract_google_ads,
+    "GOOGLE_WORKSPACE": extract_google_workspace,
+    "LINKEDIN": extract_linkedin,
+    "SA360": extract_sa360,
+}
+
+# Helper Functions
+def build_text_dict(pdf):
+    return {f"page_{i + 1}": {"text": page.extract_text()} for i, page in enumerate(pdf.pages)}
+
+def extract_invoice_number(text_dict):
+    full_text = "\n".join(p.get("text", "") for p in text_dict.values())
+    match = re.search(r"Invoice number[:\s]*([0-9]{7,})", full_text, re.IGNORECASE)
+    return match.group(1) if match else None
+
+def extract_invoice_month(text_dict):
+    full_text = "\n".join(p.get("text", "") for p in text_dict.values())
+    match = re.search(r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s+\d{4}\s*[-–]\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s+\d{4}", full_text)
+    return match.group(0) if match else None
+
+def dump_text_debug(text_dict):
+    print("\n--- DEBUG: Raw Page Text ---")
+    for page, data in text_dict.items():
+        print(f"\n{page.upper()}:\n{data.get('text', '')}")
+
+def dump_account_blocks(text_dict):
+    for page, data in text_dict.items():
+        text = data.get("text", "")
+        accounts = re.findall(r"Account ID:\s*\d+", text)
+        if accounts:
+            print(f"\n{page.upper()} ACCOUNTS:\n" + "\n".join(accounts))
+
+# Main Parser Class
 class SuperHeroFlex:
-    def __init__(self, file_paths_or_dir):
-        if isinstance(file_paths_or_dir, str) and Path(file_paths_or_dir).is_dir():
-            self.file_paths = list(Path(file_paths_or_dir).rglob("*.pdf"))
-        elif isinstance(file_paths_or_dir, Iterable) and not isinstance(file_paths_or_dir, str):
-            self.file_paths = [Path(p) for p in file_paths_or_dir]
-        else:
-            self.file_paths = [Path(file_paths_or_dir)]
+    def __init__(self, pdf_dir: str=None, file_paths: list[str] = None):
+        self.pdf_dir = Path(pdf_dir) if pdf_dir else None
+        self.file_paths = [Path(p) for p in file_paths] if file_paths else []
 
-    def identify_product_static(self, text):
-        text = text.lower()
-        if "campaign manager 360" in text or "cm360" in text:
-            return "CM360"
-        elif "display and video 360" in text or "dv360" in text:
-            return "DV360"
-        elif "google ads" in text:
-            return "Google Ads"
-        elif "linkedin" in text:
-            return "LinkedIn"
-        elif "google workspace" in text:
-            return "Google Workspace"
-        return "Unknown"
+        if not self.pdf_dir and not self.file_paths:
+            raise ValueError("Must provide either a pdf_dir or file_paths.")
+        self.results = []
+        self.extractor_map = extractor_map
 
-    def extract_all(self):
-        all_rows = []
-
-        for path in self.file_paths:
-            filename = os.path.basename(path)
-
+    def extract_all(self) -> pd.DataFrame:
+        pdf_list = self.file_paths or list(self.pdf_dir.glob("*.pdf"))
+        for pdf_file in pdf_list:
             try:
-                with pdfplumber.open(path) as pdf:
-                    first_page_text = pdf.pages[0].extract_text() or ""
-                    product = self.identify_product_static(first_page_text)
+                with pdfplumber.open(pdf_file) as pdf:
+                    text_dict = build_text_dict(pdf)
 
-                    if not product or product == "Unknown":
-                        print(f"⚠️ Could not identify product for {filename}")
+                context = {
+                    "invoice_num": extract_invoice_number(text_dict),
+                    "invoice_month": extract_invoice_month(text_dict),
+                    "text_dict": text_dict,
+                }
+
+                product_type = self.identify_product(text_dict)
+
+                # SA360 override
+                if product_type == "SA360":
+                    full_text = "\n".join(p.get("text", "") if isinstance(p, dict) else "" for p in text_dict.values())
+                    invoice_match = re.search(r"INVOICE\s+#?:?\s*(\d{5,})", full_text, re.IGNORECASE)
+                    if invoice_match:
+                        context["invoice_num"] = invoice_match.group(1)
+                    month_from_header = re.search(r'Search Ads 360\s*[-–]\s*(\w+\s+\d{4})', full_text, re.IGNORECASE)
+                    if month_from_header:
+                        context["invoice_month"] = month_from_header.group(1)
+
+                extractor = self.get_extractor(product_type)
+
+                if extractor:
+                    full_path = str(pdf_file.resolve())
+                    try:
+                        df = extractor(
+                            text_dict,
+                            context.get("invoice_num", ""),
+                            full_path,
+                            context.get("invoice_month", "")
+                        )
+
+                        # Support both single df and (df_summary, df_detail) formats
+                        if isinstance(df, tuple):
+                            for d in df:
+                                if isinstance(d, pd.DataFrame) and not d.empty:
+                                    self.results.append(d)
+                        elif isinstance(df, pd.DataFrame) and not df.empty:
+                            self.results.append(df)
+                        else:
+                            print(f"[INFO] No rows returned for {pdf_file.name} (type: {product_type})")
+
+                    except Exception as inner:
+                        print(f"[ERROR] Extractor failed for {pdf_file.name}: {inner}")
                         continue
-
-                    if product == "Google Ads":
-                        table_pages = pdf.pages[2:]
-                    else:
-                        table_pages = pdf.pages[1:]
-
-                    detail_text = "\n".join([p.extract_text() or "" for p in table_pages])
-
-                    tables = []
-                    for page in table_pages:
-                        tbl = page.extract_table()
-                        if tbl:
-                            tables.append(tbl)
-
-                    result = self.extract_by_product(first_page_text, tables, detail_text, product, filename)
-
-                    if not result:
-                        print(f"[INFO] No rows returned for {filename} (type: {product})")
-                        continue
-
-                    if isinstance(result, tuple) and len(result) == 2:
-                        summary_df, detail_df = result
-
-                        if isinstance(summary_df, list):
-                            summary_df = pd.DataFrame(summary_df)
-                        if isinstance(detail_df, list):
-                            detail_df = pd.DataFrame(detail_df)
-
-                        if summary_df is not None and not summary_df.empty:
-                            summary_df["filename"] = filename
-                            summary_df["RowType"] = "summary"
-                            all_rows.extend(summary_df.to_dict(orient="records"))
-
-                        if detail_df is not None and not detail_df.empty:
-                            detail_df["filename"] = filename
-                            detail_df["RowType"] = "detail"
-                            all_rows.extend(detail_df.to_dict(orient="records"))
-
-
-
-                    elif isinstance(result, list) and isinstance(result[0], dict):
-                        for row in result:
-                            row["filename"] = filename
-                            row["RowType"] = "detail"
-                            all_rows.append(row)
-
-                    else:
-                        print(f"[WARNING] Unrecognized return format for {filename}")
+                else:
+                    print(f"[WARNING] No extractor found for {pdf_file.name}")
 
             except Exception as e:
-                print(f"[ERROR] Failed processing {filename}: {e}")
-                all_rows.append({
-                    "InvoiceType": "Error",
-                    "Invoice#": "N/A",
-                    "Month": "N/A",
-                    "filename": filename,
-                    "RowType": "error",
-                    "Error": f"Error processing {filename}: {str(e)}"
-                })
+                print(f"[CRITICAL] Failed processing {pdf_file}: {e}")
 
-        return pd.DataFrame(all_rows)
+        return pd.concat(self.results, ignore_index=True) if self.results else pd.DataFrame()
 
-    def extract_by_product(self, full_text, tables, detail_text, product, filename):
-        if product == "CM360":
-            return extract_cm360(full_text, detail_text, full_text, tables)
-        elif product == "DV360":
-            return extract_dv360(full_text, tables, detail_text, filename)
-        elif product == "Google Ads":
-            return extract_google_ads(full_text, tables, detail_text, filename)
-        elif product == "LinkedIn":
-            return extract_linkedin(full_text, tables, detail_text, filename)
-        elif product == "Google Workspace":
-            return extract_google_workspace(full_text, tables, detail_text, filename)
+
+    def identify_product(self, text_dict) -> str:
+        full_text = "\n".join(p.get("text", "") for p in text_dict.values())
+        if "Campaign Manager 360" in full_text:
+            return "CM360"
+        elif "Google Ads" in full_text:
+            return "GOOGLE_ADS"
+        elif "Google Workspace" in full_text:
+            return "GOOGLE_WORKSPACE"
+        elif "LinkedIn" in full_text:
+            return "LINKEDIN"
+        elif "Display and Video 360" in full_text or "Display & Video 360" in full_text:
+            return "DV360"
+        elif "Search Ads 360" in full_text:
+            return "SA360"
         else:
-            return [{
-                "InvoiceType": "Unknown",
-                "Invoice#": "N/A",
-                "Month": "N/A",
-                "Description": "Unknown format",
-                "Error": f"No line items extracted for {filename}"
-            }]
+            return "UNKNOWN"
 
+
+    def get_extractor(self, product_type):
+        return self.extractor_map.get(product_type)
+
+    def find_missing(self, df):
+        expected_fields = [
+            "InvoiceType", "Invoice#", "Month", "filename", "RowType", "AdvertiserName",
+            "AdvertiserID", "Campaign", "CampaignID", "BillingCode", "Fee", "UoM",
+            "Unit Price", "Quantity", "Amount($)"
+        ]
+        missing = [f for f in expected_fields if f not in df.columns]
+        if missing:
+            print("[WARNING] Missing fields:", missing)
+        return missing
