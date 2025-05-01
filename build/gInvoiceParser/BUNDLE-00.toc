@@ -1,3 +1,0 @@
-([('gInvoiceParser',
-   '/Users/ryan.mcculloch/Documents/gInvoiceParser/dist/gInvoiceParser',
-   'EXECUTABLE')],)
