@@ -1,92 +1,3 @@
-# import re
-# import pandas as pd
-# from pathlib import Path
-# from typing import Union
-
-# def extract_dv360(text_dict, invoice_num, filename, invoice_month) -> Union[pd.DataFrame, None]:
-#     summary_text = text_dict.get("page_1", {}).get("text", "")
-#     detail_text = "\n".join(p.get("text", "") for k, p in text_dict.items() if k != "page_1")
-#     rows = []
-
-#     # --- Summary metadata ---
-#     invoice_number_match = re.search(r"Invoice number[:\s]*([\d\-]+)", summary_text, re.IGNORECASE)
-#     date_range_match = re.search(r"Summary for\s+([A-Za-z]+\s+\d{1,2},\s+\d{4})\s*[-–]\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})", summary_text)
-#     amount_match = re.search(r"Total amount due.*?\$([\d,]+\.\d{2})", summary_text)
-
-#     invoice_number = invoice_number_match.group(1) if invoice_number_match else invoice_num
-#     month = f"{date_range_match.group(1)} - {date_range_match.group(2)}" if date_range_match else invoice_month
-#     total_amount = float(amount_match.group(1).replace(",", "")) if amount_match else 0.0
-
-#     rows.append({
-#         "InvoiceType": "Display and Video 360",
-#         "Invoice#": invoice_number,
-#         "Month": month,
-#         "filename": Path(filename).name,
-#         "RowType": "summary",
-#         "FeeType": "Total",
-#         "Partner": "SUMMARY",
-#         "PartnerID": "SUMMARY",
-#         "AdvertiserName": "SUMMARY",
-#         "AdvertiserID": "SUMMARY",
-#         "Quantity": "",
-#         "UOM": "",
-#         "Unit Price": "",
-#         "Amount($)": total_amount
-#     })
-
-#     # --- Reformat broken lines in detail_text ---
-#     lines = detail_text.splitlines()
-#     merged_lines = []
-#     buffer = ""
-
-#     for line in lines:
-#         line = line.strip()
-#         if not line:
-#             continue
-#         if re.search(r"(Media Cost|Platform Fee|Data Fee|Adjustment|Advertiser)", line):
-#             if buffer:
-#                 merged_lines.append(buffer.strip())
-#             buffer = line
-#         else:
-#             buffer += " " + line
-#     if buffer:
-#         merged_lines.append(buffer.strip())
-
-#     # --- Pattern match after cleanup ---
-#     pattern = re.compile(
-#         r"(?P<fee_type>.*?) - Partner: (?P<partner_name>.*?) ID: (?P<partner_id>\d+)\s*-\s*Advertiser: (?P<advertiser_name>.*?) ID: (?P<advertiser_id>\d+)\s+(?P<quantity>[-\d,]+)\s+(?P<uom>\w+)\s+(?P<amount>[-\d,.]+)"
-#     )
-
-#     for line in merged_lines:
-#         match = pattern.search(line)
-#         if match:
-#             try:
-#                 quantity = int(match.group("quantity").replace(",", ""))
-#                 amount = float(match.group("amount").replace(",", ""))
-#                 unit_price = round(amount / quantity, 4) if quantity != 0 else None
-
-#                 rows.append({
-#                     "InvoiceType": "Display and Video 360",
-#                     "Invoice#": invoice_number,
-#                     "Month": month,
-#                     "filename": Path(filename).name,
-#                     "RowType": "detail",
-#                     "FeeType": match.group("fee_type").strip(),
-#                     "Partner": match.group("partner_name").strip(),
-#                     "PartnerID": match.group("partner_id"),
-#                     "AdvertiserName": match.group("advertiser_name").strip(),
-#                     "AdvertiserID": match.group("advertiser_id"),
-#                     "Quantity": quantity,
-#                     "UOM": match.group("uom"),
-#                     "Unit Price": unit_price,
-#                     "Amount($)": amount
-#                 })
-#             except Exception as e:
-#                 print(f"[WARN] Skipped malformed DV360 line: {e}")
-
-#     print(f"[INFO] Parsed {len(rows) - 1} DV360 detail rows from {filename}")
-#     return pd.DataFrame(rows)
-
 import re
 import pandas as pd
 from pathlib import Path
@@ -95,7 +6,7 @@ from typing import Union
 def buffer_and_merge_lines(text_dict):
     """
     Smartly merge broken lines across pages if needed.
-    Returns a list of fully reconstructed logical lines.
+    Returns a list of fully reconstructed lines.
     """
     lines = []
     for page_num, page_data in text_dict.items():
@@ -132,16 +43,21 @@ def extract_dv360(text_dict, invoice_num, filename, invoice_month) -> Union[pd.D
     invoice_number_match = re.search(r"Invoice number[:\s]*([\d\-]+)", summary_text, re.IGNORECASE)
     date_range_match = re.search(r"Summary for\s+([A-Za-z]+\s+\d{1,2},\s+\d{4})\s*[-–]\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})", summary_text)
     amount_match = re.search(r"Total amount due.*?\$([\d,]+\.\d{2})", summary_text)
+    due_date_match = re.search(r"Due\s+([A-Za-z]+\s+\d{1,2},\s+\d{4})", summary_text)
+
 
     invoice_number = invoice_number_match.group(1) if invoice_number_match else invoice_num
     month = f"{date_range_match.group(1)} - {date_range_match.group(2)}" if date_range_match else invoice_month
     total_amount = float(amount_match.group(1).replace(",", "")) if amount_match else 0.0
+    due_date = due_date_match.group(1) if due_date_match else ""
 
     # Add summary row
     rows.append({
         "InvoiceType": "Display and Video 360",
         "Invoice#": invoice_number,
         "Month": month,
+        "Amount($)": total_amount, 
+        "DueDate": due_date, 
         "filename": Path(filename).name,
         "RowType": "summary",
         "FeeType": "Total",
