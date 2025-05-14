@@ -5,6 +5,7 @@ import pandas as pd
 import subprocess
 import platform
 from gInvoiceParser.parser import SuperHeroFlex
+from pathlib import Path
 
 class InvoiceApp:
     def __init__(self, root):
@@ -30,6 +31,7 @@ class InvoiceApp:
             self.file_paths = list(files)
             messagebox.showinfo("Files Selected", f"{len(files)} PDF file(s) loaded.")
 
+
     def extract_invoices(self):
         if not self.file_paths:
             messagebox.showerror("Error", "Please select PDF files to extract.")
@@ -37,24 +39,30 @@ class InvoiceApp:
 
         try:
             parser = SuperHeroFlex(file_paths=self.file_paths)
-            df = parser.extract_all()
+            parser.extract_all()
 
-            output_path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx")])
-            if not output_path:
-                messagebox.showinfo("Cancelled", "No file selected. Operation cancelled.")
+            output_dir = filedialog.askdirectory(title="Select Output Folder")
+            if not output_dir:
+                messagebox.showinfo("Cancelled", "No folder selected. Operation cancelled.")
                 return
 
-            df.to_excel(output_path, index=False)
-            self.output_file = output_path
+            if not parser.results_by_product:
+                messagebox.showinfo("No Output", "No data was extracted from the uploaded PDFs.")
+                return
+
+            parser.export_by_product(Path(output_dir))
+            self.output_file = output_dir
             self.view_btn.config(state="normal")
-            messagebox.showinfo("Success", f"Extraction completed!\nFile saved to: {output_path}")
+            messagebox.showinfo("Success", f"Extraction completed!\nFiles saved to: {output_dir}")
 
         except Exception as e:
             messagebox.showerror("Processing Error", f"An unexpected error occurred:\n{e}")
 
+
+
     def view_excel(self):
         if not self.output_file:
-            messagebox.showerror("Error", "No output file to view.")
+            messagebox.showerror("Error", "No output folder to view.")
             return
 
         try:
@@ -65,7 +73,8 @@ class InvoiceApp:
             else:
                 subprocess.call(["xdg-open", self.output_file])
         except Exception as e:
-            messagebox.showerror("Error Opening File", f"Could not open file:\n{e}")
+            messagebox.showerror("Error Opening Folder", f"Could not open folder:\n{e}")
+
 
 def main():
     root = tk.Tk()
