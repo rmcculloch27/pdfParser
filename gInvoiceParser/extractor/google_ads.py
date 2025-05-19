@@ -1,173 +1,135 @@
-# import re
-# import pandas as pd
-
-# def extract_google_ads(summary_text: str, tables: list, detail_text: str, filename: str):
-#     # --- Step 1: Metadata extraction ---
-#     invoice_number_match = re.search(r"Invoice number[:\s]*([0-9]+)", summary_text, re.IGNORECASE)
-#     date_range_match = re.search(
-#         r"Summary for\s+([A-Za-z]+\s+\d{1,2},\s+\d{4})\s*-\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})",
-#         summary_text,
-#         re.IGNORECASE
-#     )
-#     amount_match = re.search(r"Total amount due.*?\$([\d,]+\.\d{2})", summary_text, re.IGNORECASE)
-
-#     invoice_number = invoice_number_match.group(1) if invoice_number_match else "N/A"
-#     month = f"{date_range_match.group(1)} - {date_range_match.group(2)}" if date_range_match else "N/A"
-#     total_amount = float(amount_match.group(1).replace(",", "")) if amount_match else 0.0
-
-#     detail_rows = []
-
-#     # --- Step 2: Structured table parsing (if any) ---
-#     if tables:
-#         print(f"[DEBUG] Google Ads: Found {len(tables)} tables in {filename}")
-#         for table in tables:
-#             if not table or len(table) < 2:
-#                 continue
-#             for row in table[1:]:
-#                 if not row or len(row) < 4:
-#                     continue
-#                 try:
-#                     detail_rows.append({
-#                         "InvoiceType": "Google Ads",
-#                         "Invoice#": invoice_number,
-#                         "Month": month,
-#                         "Description": row[0],
-#                         "Quantity": row[1],
-#                         "UOM": row[2],
-#                         "Amount($)": float(row[-1].replace(",", ""))
-#                     })
-#                 except Exception:
-#                     continue
-
-#     # --- Step 3: Fallback parsing from detail_text ---
-#     if not detail_rows:
-#         print(f"[DEBUG] No valid tables for {filename}. Using fallback text parsing.")
-
-#         # Debug: show snippet
-#         print(f"[DEBUG] Fallback text snippet for {filename}:\n{detail_text[:500]}")
-
-#         fallback_pattern = re.compile(
-#             r"(?P<desc>.+?)\s+(?P<qty>[\d,]+)\s+(?P<uom>\w+)\s+\$?(?P<amount>[\d,]+\.\d{2})"
-#         )
-
-#         for line in detail_text.splitlines():
-#             match = fallback_pattern.match(line.strip())
-#             if match:
-#                 try:
-#                     detail_rows.append({
-#                         "InvoiceType": "Google Ads",
-#                         "Invoice#": invoice_number,
-#                         "Month": month,
-#                         "Description": match.group("desc").strip(),
-#                         "Quantity": int(match.group("qty").replace(",", "")),
-#                         "UOM": match.group("uom"),
-#                         "Amount($)": float(match.group("amount").replace(",", ""))
-#                     })
-#                 except Exception:
-#                     continue
-
-#     # --- Step 4: Return summary + detail ---
-#     summary_df = pd.DataFrame([{
-#         "InvoiceType": "Google Ads",
-#         "Invoice#": invoice_number,
-#         "Month": month,
-#         "Amount($)": round(total_amount, 2)
-#     }])
-#     detail_df = pd.DataFrame(detail_rows)
-
-#     print(f"[DEBUG] Parsed {len(detail_df)} Google Ads line items for {filename}")
-#     return summary_df, detail_df
-
-# import re
-# import pandas as pd
-# from pathlib import Path
-# from typing import Union
-
-# def extract_google_ads(text_dict, invoice_num, filename, invoice_month) -> Union[pd.DataFrame, None]:
-#     rows = []
-
-#     # Reconstruct full text from parsed text_dict
-#     full_text = "\n".join(p.get("text", "") for p in text_dict.values())
-
-#     # Split by account section
-#     account_sections = re.split(r"(?=Account ID: \d+)", full_text)
-#     for section in account_sections:
-#         account_match = re.search(r"Account ID: (\d+)", section)
-#         advertiser_match = re.search(r"Advertiser: (.+)", section)
-
-#         account_id = account_match.group(1) if account_match else None
-#         advertiser = advertiser_match.group(1).strip() if advertiser_match else None
-
-#         detail_matches = re.findall(
-#             r"(.*?)\s+(CPM|CPC)\s+([\d.]+)\s+([\d,]+)\s+\$([\d.,]+)",
-#             section,
-#             flags=re.DOTALL,
-#         )
-
-#         for desc, uom, unit_price, quantity, amount in detail_matches:
-#             rows.append({
-#                 "InvoiceType": "GOOGLE_ADS",
-#                 "Invoice#": invoice_num,
-#                 "Month": invoice_month,
-#                 "filename": Path(filename).name,
-#                 "RowType": "detail",
-#                 "AdvertiserName": advertiser,
-#                 "AdvertiserID": account_id,
-#                 "Description": desc.strip(),
-#                 "UoM": uom,
-#                 "Unit Price": float(unit_price),
-#                 "Quantity": int(quantity.replace(",", "")),
-#                 "Amount($)": float(amount.replace(",", "")),
-#             })
-
-#     return pd.DataFrame(rows) if rows else None
-from pathlib import Path
 import re
 import pandas as pd
+from pathlib import Path
 from typing import Union
 
+def buffer_blocks_google_ads(full_text: str) -> list[str]:
+    """
+    Split blocks using the 'For questions about this invoice' footer
+    to prevent account metadata from leaking between sections.
+    """
+    # Split on each occurrence of the footer line
+    pattern = r"For questions about this invoice.*?Page \d+ of \d+"
+    parts = re.split(pattern, full_text)
+
+    blocks = [part.strip() for part in parts if part.strip()]
+    print(f"[DEBUG] Buffered {len(blocks)} blocks from full text using page footer strategy.")
+    for i, block in enumerate(blocks):
+        print(f"\n[BLOCK {i+1}]\n{'='*60}\n{block[:500]}\n{'='*60}")  # Truncated for readability
+    return blocks
+
+
 def extract_google_ads(text_dict, invoice_num: str, filename: str, invoice_month: str) -> Union[pd.DataFrame, None]:
+    summary_text = text_dict.get("page_1", {}).get("text", "")
     full_text = "\n".join(p.get("text", "") for p in text_dict.values())
-    if "Summary of costs by account budget" not in full_text:
-        return None  # Likely not a proper Google Ads invoice
+
+    print("\n[DEBUG] Full text dictionary content:")
+    for k, v in text_dict.items():
+        print(f"--- {k} ---\n{v.get('text', '')}\n")
+
+    # Summary metadata
+    # summary text clean eliminates white space for cleaner extraction
+    summary_text_clean = re.sub(r'[\s\.]+', '', summary_text)
+    print("\n[DEBUG] Cleaned summary_text:\n", summary_text_clean)
+
+
+    invoice_number_match = re.search(r"Invoice number[:\s]*([0-9]+)", summary_text, re.IGNORECASE)
+    date_range_match = re.search(
+        r"Summary for\s+([A-Za-z]+\s+\d{1,2},\s+\d{4})\s*[-\u2013]\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})",
+        summary_text,
+        re.IGNORECASE
+    )
+    amount_match = re.search(r"TotalamountdueinUSD\$([\d,]+\.\d{2})", summary_text_clean, re.IGNORECASE)
+    due_date_match = re.search(r"Due([A-Za-z]+\d{1,2},\d{4})", summary_text_clean, re.IGNORECASE)
+    billing_id_match = re.search(r"BillingID[:]*([\d]{4}-[\d]{4}-[\d]{4})", summary_text_clean, re.IGNORECASE)
+    print("\n[DEBUG] billng id match:\n", billing_id_match)
+    print("\n[DEBUG] due date match:\n", due_date_match)
+
+    billing_code = billing_id_match.group(1) if billing_id_match else None
+    due_date = due_date_match.group(1) if due_date_match else ""
+    invoice_number = invoice_number_match.group(1) if invoice_number_match else invoice_num
+    month = f"{date_range_match.group(1)} - {date_range_match.group(2)}" if date_range_match else invoice_month
+    total_amount = float(amount_match.group(1).replace(",", "")) if amount_match else 0.0
 
     rows = []
-    account_id = None
-    account_name = None
-    account_budget = None
 
-    for page in text_dict.values():
-        text = page.get("text", "")
-        lines = text.splitlines()
+    # Summary row
+    rows.append({
+        "InvoiceType": "Google Ads",
+        "Invoice#": invoice_number,
+        "Month": month,
+        "DueDate": due_date,
+        "BillingCode": billing_code,
+        "filename": Path(filename).name,
+        "RowType": "summary",
+        "Account ID": "SUMMARY",
+        "Account": "SUMMARY",
+        "Account budget": "SUMMARY",
+        "Description": "",
+        "Quantity": "",
+        "UOM": "",
+        "Amount($)": total_amount
+    })
 
-        for line in lines:
-            id_match = re.match(r"Account ID: (\S+)", line)
-            name_match = re.match(r"Account: (.+)", line)
-            budget_match = re.match(r"Account budget: (.+)", line)
+    # Block parsing
+    blocks = buffer_blocks_google_ads(full_text)
+
+    for block in blocks:
+        account_id_match = re.search(r"Account ID: (\S+)", block)
+        account_name_match = re.search(r"Account: (.+)", block)
+        account_budget_match = re.search(r"Account budget: (.+)", block)
+
+        account_id = account_id_match.group(1).strip() if account_id_match else None
+        account_name = account_name_match.group(1).strip() if account_name_match else None
+        account_budget = account_budget_match.group(1).strip() if account_budget_match else None
+
+        flines = block.splitlines()
+        i = 0
+        while i < len(flines):
+            line = flines[i].strip()
+            next_line = flines[i + 1].strip() if i + 1 < len(flines) else ""
+
+            # Init default row fields
+            desc = ""
+            qty = ""
+            uom = ""
+            amount = None
+
+            # --- Case 1: Standard Clicks/Impressions ---
             detail_match = re.match(r"(.+?)\s+(\d+)\s+(Clicks|Impressions)\s+([\d,.]+)", line)
-
-            if id_match:
-                account_id = id_match.group(1)
-            if name_match:
-                account_name = name_match.group(1)
-            if budget_match:
-                account_budget = budget_match.group(1)
-
             if detail_match:
                 desc, qty, uom, amount = detail_match.groups()
+                i += 1
+
+            # --- Case 2: Multiline fallback for Invalid activity ---
+            elif "Invalid activity" in line and re.match(r"^-?\$?[\d,.]+$", next_line):
+                desc = line
+                amount = next_line
+                i += 2
+
+            else:
+                i += 1
+                continue
+
+            try:
                 rows.append({
                     "InvoiceType": "Google Ads",
-                    "Invoice#": invoice_num,
-                    "Month": invoice_month,
-                    "filename": filename,
+                    "Invoice#": invoice_number,
+                    "Month": month,
+                    "filename": Path(filename).name,
                     "RowType": "detail",
                     "Account ID": account_id,
                     "Account": account_name,
                     "Account budget": account_budget,
                     "Description": desc.strip(),
-                    "Quantity": int(qty),
+                    "Quantity": int(qty) if qty else "",
                     "UOM": uom,
-                    "Amount($)": float(amount.replace(",", "")),
+                    "Amount($)": float(str(amount).replace(",", "").replace("$", "")) if amount else None
                 })
+            except Exception as e:
+                print(f"[ERROR] Failed to parse row from line: '{line}'\n{e}")
 
+
+
+    print(f"\n[DEBUG] Parsed {len(rows)-1} detail rows + 1 summary row for {filename}")
     return pd.DataFrame(rows) if rows else None
