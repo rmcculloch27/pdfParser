@@ -12,3 +12,6 @@ build/
 *.dmg
 *.app
 
+__pycache__/
+*.pyc
+*.pyo
