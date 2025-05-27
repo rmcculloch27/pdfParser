@@ -6,3 +6,9 @@ gInvoiceParser_debug.log
 demo/
 .env/
 venv/
+dist/
+build/
+*.zip
+*.dmg
+*.app
+
