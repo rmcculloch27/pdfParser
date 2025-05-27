@@ -10,7 +10,8 @@ dependencies = [
     "pdfplumber",
     "pandas",
     "openpyxl",
-    "tk"
+    "tk", 
+    "requests"
 ]
 
 [project.scripts]

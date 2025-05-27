@@ -5,6 +5,7 @@ import pandas as pd
 import subprocess
 import platform
 from gInvoiceParser.parser import SuperHeroFlex
+from gInvoiceParser import update
 from pathlib import Path
 
 class InvoiceApp:
@@ -77,6 +78,7 @@ class InvoiceApp:
 
 
 def main():
+    update.check_for_update()  # Check for updates on startup
     root = tk.Tk()
     app = InvoiceApp(root)
     root.mainloop()
